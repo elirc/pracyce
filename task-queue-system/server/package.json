@@ -1,0 +1,29 @@
+{
+  "name": "task-queue-server",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "worker": "nodemon src/worker.js",
+    "start": "node src/server.js",
+    "start:worker": "node src/worker.js"
+  },
+  "dependencies": {
+    "@bull-board/api": "^6.10.3",
+    "@bull-board/express": "^6.10.3",
+    "better-sqlite3": "^11.8.1",
+    "bullmq": "^5.58.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ioredis": "^5.4.2",
+    "morgan": "^1.10.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}

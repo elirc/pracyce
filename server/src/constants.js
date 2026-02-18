@@ -1,0 +1,21 @@
+const STATUS = {
+  APPLIED: 'applied',
+  INTERVIEW: 'interview',
+  OFFER: 'offer',
+  REJECTED: 'rejected'
+};
+
+const STATUS_VALUES = Object.values(STATUS);
+
+const ALLOWED_TRANSITIONS = {
+  [STATUS.APPLIED]: [STATUS.INTERVIEW, STATUS.REJECTED],
+  [STATUS.INTERVIEW]: [STATUS.OFFER, STATUS.REJECTED],
+  [STATUS.OFFER]: [],
+  [STATUS.REJECTED]: []
+};
+
+module.exports = {
+  STATUS,
+  STATUS_VALUES,
+  ALLOWED_TRANSITIONS
+};

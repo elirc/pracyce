@@ -101,13 +101,14 @@ Core behaviors:
 - explicit transition endpoint (`PATCH /:id/transition`)
 
 Important design choices:
-- all queries are user-scoped (`user_id = req.user.id`)
-- workflow transitions validated server-side (never trust UI only)
-- partial update salary check runs after merge to prevent invalid min/max combinations
+- all queries are user-scoped (`user_id = req.user.id`); reads, updates and deletes put both `id` and `user_id` in the `WHERE` clause (`applications.js:73,122,202,237`), so another user's id is a 404, never a 403
+- workflow transitions validated server-side (never trust UI only) — on `PUT` (`applications.js:134-142`) and on `PATCH /:id/transition` (`applications.js:207-217`). Create is **not** guarded: `POST` accepts any status (`validation.js:44`)
+- partial update salary check runs after merge to prevent invalid min/max combinations (`applications.js:153-164`)
+- `sort_by` is interpolated into `ORDER BY` (`applications.js:51`), which is safe only because `querySchema` restricts it to six column names (`validation.js:68`)
 
 ### Dashboard route (`server/src/routes/dashboard.js`)
-- grouped counts by status
-- derived KPIs (`active`, `conversionRate`)
+- grouped counts by status (`dashboard.js:11-18`), zero-filled for every status (`dashboard.js:22-25`)
+- derived KPIs: `active = applied + interview`, `conversionRate = (offer + interview) / total` as a percentage with one decimal (`dashboard.js:31-33`). Despite the name, interviews count as conversions.
 
 Why precompute on server:
 - keeps frontend simple
@@ -188,10 +189,11 @@ Example: moving `applied -> interview`
 
 ## 8. Security and Correctness Notes
 
-- Auth token is always server-verified (`/auth/me`) during hydrate.
+- Auth token is server-verified (`/auth/me`) during hydrate (`client/src/store/authStore.js:22-30`); after that, every API call is checked by `requireAuth` (`server/src/middleware/auth.js`), which verifies the signature and expiry but does not look the user up.
 - All app rows are user-scoped in SQL.
-- Workflow enforcement is backend-only source of truth.
+- Workflow enforcement for **updates** is backend-only source of truth; the initial status on create is whatever the client sends.
 - Query param validation limits invalid sorting/filtering fields.
+- Gaps found on review: async `register`/`login` handlers (`routes/auth.js:11,44`) can reject outside Express 4's error handling; no rate limiting on auth; JWTs cannot be revoked before their 7-day expiry; there are no tests.
 
 ## 9. Common Mistakes to Avoid
 
@@ -205,7 +207,9 @@ Example: moving `applied -> interview`
 - refresh tokens and rotating JWT secrets
 - per-field audit history (status changed by/date)
 - stronger pagination (cursor-based)
-- test suite (API + component tests)
+- test suite (API + component tests) — none exists today
+- force `applied` (or validate the initial state) on create
+- wrap async handlers (or move to Express 5) so rejected promises reach the error middleware
 - role-based collaboration (team view)
 
 ## 11. File Map to Study
@@ -226,3 +230,12 @@ Frontend:
 - `client/src/pages/ApplicationsPage.jsx`
 - `client/src/components/ApplicationFormModal.jsx`
 - `client/src/pages/DashboardPage.jsx`
+
+## 12. Exercises
+
+1. **Goal:** trace one transition end to end.
+   **Check:** you can point to the button handler (`client/src/pages/ApplicationsPage.jsx:126-138`), the route (`server/src/routes/applications.js:191-229`) and the rule table (`server/src/constants.js:10-15`), and predict the 400 message for `interview -> applied`.
+2. **Goal:** prove the post-merge salary check matters.
+   **Check:** on a row with `salary_min: 100000`, `PUT` with only `{"salary_max": 50000}` passes the Zod schema (the refine only sees one field) and is rejected by the merge check with 400 `salary_max must be greater than or equal to salary_min`.
+3. **Goal:** see why hydrate exists.
+   **Check:** put a garbage value in `localStorage.job_tracker_token` (with any `job_tracker_user`) and reload; `/auth/me` returns 401 and both keys are removed before the login page renders.

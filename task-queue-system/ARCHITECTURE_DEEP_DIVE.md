@@ -19,7 +19,7 @@ Provide a realistic async-processing app (bulk email sender) with:
   - writes metadata to SQLite
   - enqueues jobs in Redis via BullMQ
   - exposes dashboard APIs and Bull Board
-- Worker (`server/src/worker.js`, `server/src/workers/emailWorker.js`)
+- Worker (`server/src/worker.js`, a one-line `require('./workers/emailWorker')`; the logic is in `server/src/workers/emailWorker.js`)
   - consumes queue jobs
   - executes processing logic
   - updates job status in SQLite
@@ -73,13 +73,13 @@ Why defaults at queue level:
 
 File: `server/src/routes/campaigns.js`
 
-Step-by-step:
-1. Validate request with Zod.
+Step-by-step (`campaigns.js:40-110`):
+1. Validate request with Zod. Caveat: `validateOrRespond` returns the `res` object after sending a 400 (`server/src/lib/validation.js:28`), so the `if (!data) return;` guard does not stop the handler — see "Known defects" below.
 2. Normalize + dedupe recipient list.
 3. Insert campaign row first.
 4. Build one BullMQ job payload per recipient.
-5. `addBulk` to queue.
-6. Save `queue_job_id` mappings to `campaign_jobs` in a DB transaction.
+5. `addBulk` to queue (`campaigns.js:77`); each job gets a deterministic id `<campaignId>:<n>:<email>` (`campaigns.js:68`).
+6. Save `queue_job_id` mappings to `campaign_jobs` in a DB transaction (`campaigns.js:80-88`). Because this happens *after* the jobs are already in Redis, a fast worker can process a job before its row exists; its `UPDATE` then matches nothing and the row stays `queued`.
 7. Return campaign metadata.
 
 Failure behavior:
@@ -88,6 +88,7 @@ Failure behavior:
 Why this order:
 - job rows need stable campaign foreign key
 - dashboard should never show phantom campaigns with zero queue linkage
+- the deterministic job ids would also allow the safer order — write the `campaign_jobs` rows first, then enqueue — which removes the race in step 6
 
 ## 6. Worker + Retry + DLQ Flow
 
@@ -102,7 +103,8 @@ Worker event handling:
 
 Important BullMQ nuance:
 - `failed` event fires for each failed attempt.
-- You must detect terminal failure (`attemptsMade >= maxAttempts`) before moving to DLQ.
+- You must detect terminal failure (`attemptsMade >= maxAttempts`) before moving to DLQ (`emailWorker.js:75-78`).
+- The DLQ move is two independent writes — `deadLetterQueue.add` then `INSERT OR IGNORE INTO dead_letters` (`emailWorker.js:106-126`). Only the second is idempotent, and nothing consumes the `dead-letter-jobs` queue; it exists for inspection in Bull Board.
 
 ## 7. Dead Letter Requeue
 
@@ -120,6 +122,8 @@ Steps:
 Why new job id matters:
 - preserves immutable history
 - avoids reusing failed execution identity
+
+Caveat: steps 1-5 are not atomic (`dashboard.js:113-172`). Two concurrent requeues of the same row can both pass the `resolved` check and enqueue two jobs; an `UPDATE dead_letters SET resolved = 1 WHERE id = ? AND resolved = 0` checked for `changes === 1` *before* enqueueing would make it safe.
 
 ## 8. Monitoring APIs and Views
 
@@ -187,8 +191,8 @@ Campaign with 3 recipients:
 - Redis must be running before queue operations.
 - Health endpoint is timeout-protected so API does not hang when Redis is down.
 - If Redis is down:
-  - dashboard DB reads still work
-  - enqueue/worker operations fail as expected
+  - `/api/health` reports the error within 800 ms (`server.js:34-54`)
+  - routes that touch BullMQ do not fail fast: the shared ioredis connection uses `maxRetriesPerRequest: null` (`server/src/lib/redis.js:9`), so commands wait for a reconnect. `/api/dashboard/summary` awaits queue counts before reading SQLite (`dashboard.js:10-13`), so it waits too; `/campaigns` list and job list (SQLite only) keep working.
 
 ## 13. Common Mistakes to Avoid
 
@@ -196,6 +200,7 @@ Campaign with 3 recipients:
 - moving to DLQ on any failed attempt (instead of terminal failure only)
 - forgetting to mark dead-letter row resolved after requeue
 - relying only on BullMQ storage for historical analytics
+- returning the response object from a validation helper (this codebase does: `validation.js:28`) — the caller's falsy check never fires
 
 ## 14. File Map to Study
 
@@ -212,3 +217,20 @@ Frontend:
 - `client/src/App.jsx`
 - `client/src/components/StatCard.jsx`
 - `client/src/lib/api.js`
+
+## 15. Known defects (found on review)
+
+1. `validateOrRespond` returns `res` on failure (`server/src/lib/validation.js:28`). In the `async` campaign and requeue handlers the code continues with `res` as its data and throws, which Express 4 does not route to the error middleware; in sync handlers a second response triggers `ERR_HTTP_HEADERS_SENT`.
+2. Enqueue-before-insert race between `campaigns.js:77` and `campaigns.js:80-88` (see section 5).
+3. Requeue double-enqueue race (see section 7).
+4. `emailQueueEvents` is created but unused (`server/src/queues/index.js:37`).
+5. Bull Board is mounted without authentication (`server.js:59`).
+
+## 16. Exercises
+
+1. **Goal:** map one job's life to rows.
+   **Check:** for a campaign with `failRate: 1` and `maxAttempts: 3`, you can predict every value `campaign_jobs.status` takes and the `attempts_made` stored with each, then confirm in the DB.
+2. **Goal:** fix defect 1.
+   **Check:** an invalid `POST /api/campaigns` body returns 400 once, the server log shows no error, and the process keeps serving requests.
+3. **Goal:** prove the DB survives Redis cleanup.
+   **Check:** after a completed campaign is older than an hour, its jobs are gone from BullMQ (`removeOnComplete.age: 3600`, `server/src/queues/index.js:18-21`) but still listed by `GET /api/campaigns/:id/jobs`.
